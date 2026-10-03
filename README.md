@@ -15,11 +15,7 @@ A small classroom management app for courses, student enrollment, fees, schedule
 
 Keep the server running while using the app. Course and student records are stored in `classroom.sqlite3` on this computer; that database is intentionally excluded from Git.
 
-## Demo sign-in
 
-- `admin` / `learn123`
-- `teacher` / `class123`
-- `staff` / `welcome1`
 
 These are development demo accounts. Change them before exposing the app to other people.
 
