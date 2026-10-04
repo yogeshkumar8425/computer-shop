@@ -201,6 +201,7 @@ if (sessionStorage.getItem("classUser")) {
 // Account creation and sign-in use the server. New accounts require an SMS OTP.
 const CLASSROOM_API_ROOT = location.protocol === "file:" ? "http://127.0.0.1:8000/api" : "/api";
 let signupStage = "details";
+let savedSnapshot = { courses: [], students: [] };
 
 async function classroomApi(path, payload, authenticated = false) {
   const headers = { "Content-Type": "application/json" };
@@ -217,13 +218,19 @@ async function classroomApi(path, payload, authenticated = false) {
 }
 
 async function saveSqliteSnapshot() {
-  const response = await fetch(CLASSROOM_API_ROOT + "/data", {
-    method: "PUT",
+  const deletedCourseNames = savedSnapshot.courses
+    .filter(old => !courses.some(current => current.name === old.name))
+    .map(course => course.name);
+  const deletedStudentIds = savedSnapshot.students
+    .filter(old => !students.some(current => Number(current.id) === Number(old.id)))
+    .map(student => Number(student.id));
+  const response = await fetch(CLASSROOM_API_ROOT + "/data/changes", {
+    method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${sessionStorage.getItem("classroomToken") || ""}`,
     },
-    body: JSON.stringify({ courses, students }),
+    body: JSON.stringify({ courses, students, deletedCourseNames, deletedStudentIds }),
   });
   const result = await response.json().catch(() => ({}));
   if (response.status === 401) {
@@ -232,6 +239,7 @@ async function saveSqliteSnapshot() {
     throw error;
   }
   if (!response.ok) throw new Error(result.error || "The database could not save your changes.");
+  savedSnapshot = JSON.parse(JSON.stringify({ courses, students }));
 }
 
 window.load = async function loadAuthenticatedDatabase() {
@@ -259,6 +267,7 @@ window.load = async function loadAuthenticatedDatabase() {
     if (changed) await saveSqliteSnapshot();
     localStorage.setItem("classroomDbMigrated", "yes");
   }
+  savedSnapshot = JSON.parse(JSON.stringify({ courses, students }));
 };
 window.persist = saveSqliteSnapshot;
 

@@ -181,7 +181,7 @@ def twilio_verify(path: str, values: dict[str, str]) -> dict:
     auth_token = os.environ.get("TWILIO_AUTH_TOKEN", "").strip()
     service_sid = os.environ.get("TWILIO_VERIFY_SERVICE_SID", "").strip()
     if not account_sid or not auth_token or not service_sid:
-        raise RuntimeError("Phone OTP is not configured. Add the Twilio Verify settings to code/.env and restart the server.")
+        raise RuntimeError("Phone OTP is not configured. Add the Twilio Verify settings to the server environment and restart or redeploy.")
     url = f"https://verify.twilio.com/v2/Services/{service_sid}/{path}"
     auth = base64.b64encode(f"{account_sid}:{auth_token}".encode()).decode()
     request = Request(url, data=urlencode(values).encode(), headers={
@@ -208,7 +208,7 @@ def twilio_send_message(channel: str, phone: str, body: str) -> dict:
     sender = os.environ.get(sender_key, "").strip()
     missing_settings = [key for key, value in (("TWILIO_ACCOUNT_SID", account_sid), ("TWILIO_AUTH_TOKEN", auth_token), (sender_key, sender)) if not value]
     if missing_settings:
-        raise RuntimeError(f"Messaging is not configured. Add {', '.join(missing_settings)} to code/.env and restart the server.")
+        raise RuntimeError(f"Messaging is not configured. Add {', '.join(missing_settings)} to the server environment and restart or redeploy.")
     normalized_phone = normalize_phone(phone)
     if channel == "whatsapp":
         if not sender.startswith("whatsapp:+"):
@@ -274,6 +274,38 @@ class ClassroomHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        if path == "/api/data/changes":
+            try:
+                if not self.bearer_account():
+                    return self.send_json(401, {"error": "Please sign in again."})
+                body = self.read_json()
+                courses = body.get("courses", [])
+                students = body.get("students", [])
+                with connect_db() as db:
+                    db.executemany(
+                        "INSERT INTO courses(name,category,fee,timing,hours,classes,seats,payment_url) VALUES(?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(name) DO UPDATE SET category=excluded.category,fee=excluded.fee,timing=excluded.timing,hours=excluded.hours,classes=excluded.classes,seats=excluded.seats,payment_url=excluded.payment_url",
+                        [(
+                            str(c.get("name", "")).strip(), str(c.get("category", "Technology")),
+                            float(c.get("fee", 0) or 0), str(c.get("timing", "")),
+                            float(c.get("hours", 0) or 0), int(c.get("classes", 0) or 0),
+                            int(c.get("seats", 0) or 0), str(c.get("payment_url", "")).strip(),
+                        ) for c in courses if str(c.get("name", "")).strip()]
+                    )
+                    db.executemany(
+                        "INSERT INTO students(id,name,phone,email,course,payment,date) VALUES(?,?,?,?,?,?,?) "
+                        "ON CONFLICT(id) DO UPDATE SET name=excluded.name,phone=excluded.phone,email=excluded.email,course=excluded.course,payment=excluded.payment,date=excluded.date",
+                        [(
+                            int(s.get("id") or index + 1), str(s.get("name", "")).strip(),
+                            str(s.get("phone", "")), str(s.get("email", "")), str(s.get("course", "")),
+                            float(s.get("payment", 0) or 0), str(s.get("date", "")),
+                        ) for index, s in enumerate(students) if str(s.get("name", "")).strip()]
+                    )
+                    db.executemany("DELETE FROM courses WHERE name=?", [(str(name),) for name in body.get("deletedCourseNames", [])])
+                    db.executemany("DELETE FROM students WHERE id=?", [(int(student_id),) for student_id in body.get("deletedStudentIds", [])])
+                return self.send_json(200, {"saved": True})
+            except (ValueError, TypeError, json.JSONDecodeError, sqlite3.Error) as exc:
+                return self.send_json(400, {"error": f"Could not save data: {exc}"})
         if path == "/api/notifications/send":
             try:
                 if not self.bearer_account():
@@ -294,7 +326,7 @@ class ClassroomHandler(SimpleHTTPRequestHandler):
                 sender_key = "TWILIO_SMS_FROM" if channel == "sms" else "TWILIO_WHATSAPP_FROM"
                 missing_settings = [key for key in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", sender_key) if not os.environ.get(key, "").strip()]
                 if missing_settings:
-                    return self.send_json(503, {"error": f"Messaging is not configured. Add {', '.join(missing_settings)} to code/.env and restart the server."})
+                    return self.send_json(503, {"error": f"Messaging is not configured. Add {', '.join(missing_settings)} to the server environment and restart or redeploy."})
                 with connect_db() as db:
                     all_students = [dict(row) for row in db.execute("SELECT name,phone,course FROM students WHERE trim(phone)<>'' ORDER BY id")]
                 recipients = []
