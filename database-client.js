@@ -57,6 +57,8 @@ function updateRequiredFields(activeSection) {
 
 document.querySelector("#addCourse").addEventListener("click", () => updateRequiredFields("courses"), true);
 document.querySelector("#addStudent").addEventListener("click", () => updateRequiredFields("students"), true);
+let editingStudentId = null;
+document.querySelector("#addStudent").addEventListener("click", () => { editingStudentId = null; }, true);
 
 document.querySelector("#dataForm").onsubmit = async event => {
   event.preventDefault();
@@ -75,12 +77,19 @@ document.querySelector("#dataForm").onsubmit = async event => {
     if (editingCourseIndex === null) courses.push(updatedCourse);
     else courses[editingCourseIndex] = updatedCourse;
   } else {
-    students.push({
+    const existingStudentIndex = editingStudentId === null
+      ? -1
+      : students.findIndex(student => Number(student.id) === Number(editingStudentId));
+    const existingStudent = existingStudentIndex >= 0 ? students[existingStudentIndex] : null;
+    const updatedStudent = {
+      ...(existingStudent || {}),
       ...values,
       payment: Number(values.payment || 0),
-      id: Date.now(),
-      date: new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", year: "numeric" }).format(new Date()),
-    });
+      id: existingStudent?.id ?? Date.now(),
+      date: existingStudent?.date || new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", year: "numeric" }).format(new Date()),
+    };
+    if (existingStudentIndex >= 0) students[existingStudentIndex] = updatedStudent;
+    else students.push(updatedStudent);
   }
   try {
     await persist();
@@ -88,6 +97,7 @@ document.querySelector("#dataForm").onsubmit = async event => {
     sessionStorage.removeItem("classroomPendingIdentity");
     form.reset();
     document.querySelector("#modal").classList.add("hidden");
+    editingStudentId = null;
     render();
   } catch (error) {
     if (error.code === "SESSION_EXPIRED") returnToSigninAfterExpiredSession();
@@ -103,11 +113,29 @@ document.body.addEventListener("click", async event => {
     const course = courses[editingCourseIndex];
     open("courses");
     for (const [key, value] of Object.entries(course)) {
-      const sectionSelector = pending.mode === "courses" ? "#courseFields" : "#studentFields";
-    const field = document.querySelector(`${sectionSelector} [name="${key}"]`);
+      const field = document.querySelector(`#courseFields [name="${key}"]`);
       if (field) field.value = value ?? "";
     }
     document.querySelector("#modalTitle").textContent = "Edit course";
+    document.querySelector("#save").textContent = "Save changes";
+    return;
+  }
+  const editStudentButton = event.target.closest("[data-edit-student]");
+  if (editStudentButton) {
+    const student = students.find(item => Number(item.id) === Number(editStudentButton.dataset.editStudent));
+    if (!student) return;
+    updateRequiredFields("students");
+    open("students");
+    editingStudentId = student.id;
+    for (const [key, value] of Object.entries(student)) {
+      const field = document.querySelector(`#studentFields [name="${key}"]`);
+      if (!field) continue;
+      if (key === "course" && value && !Array.from(field.options).some(option => option.value === value)) {
+        field.add(new Option(value, value));
+      }
+      field.value = value ?? "";
+    }
+    document.querySelector("#modalTitle").textContent = "Edit student";
     document.querySelector("#save").textContent = "Save changes";
     return;
   }
@@ -223,6 +251,7 @@ function returnToSigninAfterExpiredSession() {
   pendingFormAfterSignin = {
     mode,
     editingCourseIndex,
+    editingStudentId,
     retrySave: true,
     values: activeFormValues(),
   };
@@ -252,6 +281,7 @@ function restorePendingFormAfterSignin() {
   updateRequiredFields(pending.mode);
   open(pending.mode);
   editingCourseIndex = pending.editingCourseIndex;
+  editingStudentId = pending.editingStudentId ?? null;
   for (const [key, value] of Object.entries(pending.values)) {
     const field = document.querySelector(`#dataForm [name="${key}"]`);
     if (field) field.value = value;
@@ -261,6 +291,10 @@ function restorePendingFormAfterSignin() {
     const courseName = document.querySelector('#courseFields [name="name"]');
     if (currentCourse && !courseName.value) courseName.value = currentCourse.name;
     document.querySelector("#modalTitle").textContent = "Edit course";
+    document.querySelector("#save").textContent = "Save changes";
+  }
+  if (pending.mode === "students" && pending.editingStudentId !== null) {
+    document.querySelector("#modalTitle").textContent = "Edit student";
     document.querySelector("#save").textContent = "Save changes";
   }
   if (pending.retrySave !== false) {
