@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "api/[...path].py": {
+    "api/*.py": {
       "excludeFiles": "{classroom.sqlite3*,.env,.env.*,__pycache__/**,*.py[cod],.git/**,supabase/**}"
     }
   }
