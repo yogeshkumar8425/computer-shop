@@ -3,6 +3,9 @@
   "functions": {
     "api/*.py": {
       "excludeFiles": "{classroom.sqlite3*,.env,.env.*,__pycache__/**,*.py[cod],.git/**,supabase/**}"
+    },
+    "api/**/*.py": {
+      "excludeFiles": "{classroom.sqlite3*,.env,.env.*,__pycache__/**,*.py[cod],.git/**,supabase/**}"
     }
   }
 }
