@@ -7,5 +7,9 @@
     "api/**/*.py": {
       "excludeFiles": "{classroom.sqlite3*,.env,.env.*,__pycache__/**,*.py[cod],.git/**,supabase/**}"
     }
-  }
+  },
+  "rewrites": [
+    { "source": "/api/public/course", "destination": "/api/public-course" },
+    { "source": "/api/public/enroll", "destination": "/api/public-enroll" }
+  ]
 }
