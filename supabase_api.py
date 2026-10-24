@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import os
-import re
 import secrets
 import time
 from http.server import BaseHTTPRequestHandler
@@ -13,7 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from server import normalize_phone, normalize_student_message_phone, twilio_send_message, twilio_verify
+from server import normalize_student_message_phone, twilio_send_message
 
 
 class ApiError(Exception):
@@ -50,6 +48,35 @@ def rest(table: str, method: str = "GET", params: dict | None = None, payload=No
         raise ApiError(503 if exc.code >= 500 else 400, message) from exc
     except (URLError, TimeoutError) as exc:
         raise ApiError(503, "Could not connect to Supabase. Check the Vercel environment settings and try again.") from exc
+
+
+def auth_request(endpoint: str, payload: dict):
+    """Call Supabase Auth using the server-only key; never expose it to the browser."""
+    base = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    if not base or not key:
+        raise ApiError(503, "Supabase server settings are missing.")
+    request = Request(
+        f"{base}/auth/v1/{endpoint}",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            raw = response.read()
+            return json.loads(raw.decode("utf-8")) if raw else {}
+    except HTTPError as exc:
+        try:
+            detail = json.loads(exc.read().decode("utf-8"))
+            message = detail.get("msg") or detail.get("message") or detail.get("error_description") or "Supabase Auth request failed."
+        except Exception:
+            message = "Supabase Auth request failed."
+        if "email address not authorized" in message.lower():
+            raise ApiError(503, "Supabase email delivery is restricted. Configure a custom SMTP server in Supabase Auth settings.") from exc
+        raise ApiError(401 if exc.code in (400, 401, 422) else 503, message) from exc
+    except (URLError, TimeoutError) as exc:
+        raise ApiError(503, "Could not reach Supabase Auth. Check the project settings and try again.") from exc
 
 
 def one(table: str, **filters):
@@ -256,66 +283,52 @@ class ClassroomApiHandler(BaseHTTPRequestHandler):
             return self.send_json(201, {"registered": True, "paymentUrl": str(course.get("payment_url") or "")})
 
         if path == "/api/login":
-            identity = str(body.get("identity", "")).strip().lower()
+            email = str(body.get("email", body.get("identity", ""))).strip().lower()
             password = str(body.get("password", ""))
-            account = (one("accounts", username=identity) or one("accounts", email=identity)
-                       or one("accounts", phone=identity))
+            if "@" not in email or not password:
+                raise ApiError(400, "Enter your email address and password.")
+            try:
+                auth_result = auth_request("token?grant_type=password", {"email": email, "password": password})
+            except ApiError as exc:
+                if exc.status == 401:
+                    raise ApiError(401, "Email or password is incorrect, or verify your email before signing in.") from exc
+                raise
+            user = auth_result.get("user") or {}
+            if not user.get("email_confirmed_at"):
+                raise ApiError(401, "Verify your email from your inbox before signing in.")
+            email = str(user.get("email") or email).strip().lower()
+            account = one("accounts", email=email)
             if not account:
-                raise ApiError(401, "Email/phone or password is incorrect.")
-            digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(account["password_salt"]), 310_000).hex()
-            if not hmac.compare_digest(digest, account["password_hash"]):
-                raise ApiError(401, "Email/phone or password is incorrect.")
+                metadata = user.get("user_metadata") or {}
+                # Legacy app accounts require password columns; auth is now handled by Supabase Auth.
+                account = rest("accounts", "POST", {"on_conflict": "email"}, {
+                    "full_name": str(metadata.get("full_name") or email)[:200],
+                    "email": email,
+                    "password_salt": secrets.token_hex(16),
+                    "password_hash": secrets.token_hex(32),
+                    "created_at": int(time.time()),
+                }, "resolution=merge-duplicates,return=representation")[0]
             token = new_session(account["id"])
             return self.send_json(200, {"token": token, "account": {"name": account["full_name"], "email": account.get("email"), "phone": account.get("phone")}})
 
         if path == "/api/signup/start":
-            phone = normalize_phone(str(body.get("phone", "")))
             name = str(body.get("name", "")).strip()
             email = str(body.get("email", "")).strip().lower()
             password = str(body.get("password", ""))
             if not name or not email or "@" not in email:
                 raise ApiError(400, "Enter your name and a valid email address.")
-            if len(password) < 8:
+            if len(password) < 8 or len(password) > 128:
                 raise ApiError(400, "Choose a password with at least 8 characters.")
-            if one("accounts", phone=phone) or one("accounts", email=email):
-                raise ApiError(409, "An account already uses that phone or email.")
-            last = one("otp_rate_limits", phone=phone)
-            wait = int(last["requested_at"]) + 60 - int(time.time()) if last else 0
-            if wait > 0:
-                raise ApiError(429, f"Please wait {wait} seconds before requesting another code.")
-            import hashlib as _hashlib
-            salt = secrets.token_hex(16)
-            password_hash = _hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 310_000).hex()
-            twilio_verify("Verifications", {"To": phone, "Channel": "sms"})
-            now = int(time.time())
-            rest("otp_rate_limits", "POST", {"on_conflict": "phone"}, {"phone": phone, "requested_at": now}, "resolution=merge-duplicates,return=minimal")
-            rest("pending_signups", "POST", {"on_conflict": "phone"}, {
-                "phone": phone, "full_name": name, "email": email,
-                "password_salt": salt, "password_hash": password_hash, "expires_at": now + 600,
-            }, "resolution=merge-duplicates,return=minimal")
-            return self.send_json(200, {"sent": True, "phone": phone})
-
-        if path == "/api/signup/verify":
-            phone = normalize_phone(str(body.get("phone", "")))
-            code = re.sub(r"\s", "", str(body.get("code", "")))
-            if not re.fullmatch(r"\d{4,10}", code):
-                raise ApiError(400, "Enter the verification code from your text message.")
-            pending = one("pending_signups", phone=phone)
-            if not pending or int(pending["expires_at"]) < int(time.time()):
-                if pending:
-                    rest("pending_signups", "DELETE", {"phone": f"eq.{phone}"})
-                raise ApiError(400, "This signup code expired. Request a new code.")
-            result = twilio_verify("VerificationCheck", {"To": phone, "Code": code})
-            if result.get("status") != "approved":
-                raise ApiError(400, "That code is incorrect or expired. Try again.")
-            account = rest("accounts", "POST", payload={
-                "full_name": pending["full_name"], "email": pending["email"], "phone": phone,
-                "password_salt": pending["password_salt"], "password_hash": pending["password_hash"],
-                "created_at": int(time.time()),
-            }, prefer="return=representation")[0]
-            token = new_session(account["id"])
-            rest("pending_signups", "DELETE", {"phone": f"eq.{phone}"})
-            return self.send_json(201, {"token": token, "account": {"name": account["full_name"], "email": account["email"], "phone": phone}})
+            site_url = os.environ.get("CLASSROOM_SITE_URL", "https://computer-shop-liard.vercel.app").strip().rstrip("/")
+            endpoint = "signup?" + urlencode({"redirect_to": site_url + "/"})
+            result = auth_request(endpoint, {
+                "email": email,
+                "password": password,
+                "data": {"full_name": name, "phone": str(body.get("phone", "")).strip()[:40]},
+            })
+            if result.get("session"):
+                raise ApiError(503, "Email confirmation is disabled in Supabase. Enable Confirm Email in Authentication settings, then try again.")
+            return self.send_json(200, {"sent": True, "email": email})
 
         raise ApiError(404, "Not found.")
 

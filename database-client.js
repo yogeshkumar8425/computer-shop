@@ -1,4 +1,4 @@
-// Keep course and student records in SQLite through the local app server.
+// Keep course and student records in Supabase on Vercel and SQLite locally.
 const CLASSROOM_API = location.protocol === "file:"
   ? "http://127.0.0.1:8000/api/data"
   : "/api/data";
@@ -57,61 +57,6 @@ function updateRequiredFields(activeSection) {
 
 document.querySelector("#addCourse").addEventListener("click", () => updateRequiredFields("courses"), true);
 document.querySelector("#addStudent").addEventListener("click", () => updateRequiredFields("students"), true);
-
-async function openDashboard(userKey) {
-  sessionStorage.setItem("classUser", userKey);
-  document.querySelector("#login").style.display = "none";
-  document.querySelector("#app").style.display = "block";
-  try {
-    await load();
-    render();
-    document.querySelector("#error").textContent = "";
-    restorePendingFormAfterSignin();
-  } catch (error) {
-    document.querySelector("#error").textContent = `${error.message} Start server.py and reload.`;
-  }
-}
-
-document.querySelector("#loginForm").onsubmit = async event => {
-  event.preventDefault();
-  const message = document.querySelector("#error");
-  const password = document.querySelector("#password").value;
-  if (authMode === "signup") {
-    const name = document.querySelector("#newName").value.trim();
-    const phone = document.querySelector("#newPhone").value.trim();
-    const email = document.querySelector("#newEmail").value.trim().toLowerCase();
-    const accounts = savedAccounts();
-    if (password.length < 6) {
-      message.textContent = "Use a password with at least 6 characters.";
-      return;
-    }
-    if (accounts.some(account => account.email === email || account.phone === phone)) {
-      message.textContent = "An account already uses that email or phone number.";
-      return;
-    }
-    accounts.push({ name, phone, email, password });
-    localStorage.setItem("classroomAccounts", JSON.stringify(accounts));
-    document.querySelector("#username").value = email;
-    document.querySelector("#password").value = password;
-    setAuthMode("signin");
-    message.textContent = "Account created. Sign in with your email or phone.";
-    return;
-  }
-
-  const identity = document.querySelector("#username").value.trim().toLowerCase();
-  const demoAccounts = {
-    admin: ["learn123", "Alex Morgan"],
-    teacher: ["class123", "Jordan Lee"],
-    staff: ["welcome1", "Taylor Kim"],
-  };
-  const account = savedAccounts().find(item => item.email === identity || item.phone === identity);
-  const demo = demoAccounts[identity];
-  if ((demo && demo[0] === password) || (account && account.password === password)) {
-    await openDashboard(demo ? identity : account.email);
-  } else {
-    message.textContent = "Email/phone or password is incorrect.";
-  }
-};
 
 document.querySelector("#dataForm").onsubmit = async event => {
   event.preventDefault();
@@ -193,14 +138,8 @@ document.body.addEventListener("click", async event => {
   }
 });
 
-// The original demo can show cached data at startup. Replace it with database data.
-if (sessionStorage.getItem("classUser")) {
-  openDashboard(sessionStorage.getItem("classUser"));
-}
-
-// Account creation and sign-in use the server. New accounts require an SMS OTP.
+// Account creation and sign-in use Supabase Auth with email confirmation.
 const CLASSROOM_API_ROOT = location.protocol === "file:" ? "http://127.0.0.1:8000/api" : "/api";
-let signupStage = "details";
 let savedSnapshot = { courses: [], students: [] };
 
 async function classroomApi(path, payload, authenticated = false) {
@@ -329,31 +268,37 @@ function restorePendingFormAfterSignin() {
   }
 }
 
-window.setAuthMode = function setPhoneOtpMode(next) {
+window.setAuthMode = function setEmailVerificationMode(next) {
   authMode = next;
-  signupStage = "details";
   const signup = next === "signup";
   document.querySelector("#authEyebrow").textContent = signup ? "GET STARTED" : "WELCOME BACK";
   document.querySelector("#authTitle").textContent = signup ? "Create your account" : "Sign in";
   document.querySelector("#authHelp").textContent = signup
-    ? "Verify your mobile number to create your account."
-    : "Sign in with your email address or phone number.";
+    ? "We’ll email you a verification link before your account is activated."
+    : "Sign in with your verified email address.";
   document.querySelector("#signupFields").classList.toggle("hidden", !signup);
-  document.querySelector("#otpFields").classList.add("hidden");
   document.querySelector("#identityField").classList.toggle("hidden", signup);
   document.querySelector("#identityField input").required = !signup;
+  document.querySelector("#identityField input").type = "email";
+  document.querySelector("#identityLabel").textContent = "Email address";
+  document.querySelector("#identityField input").placeholder = "you@example.com";
+  document.querySelector("#identityField input").autocomplete = "email";
   document.querySelector("#passwordField").classList.remove("hidden");
   document.querySelector("#password").required = true;
-  document.querySelector("#otpCode").required = false;
-  ["#newName", "#newPhone", "#newEmail"].forEach(selector => {
-    document.querySelector(selector).required = signup;
-  });
-  document.querySelector("#submitAuth").textContent = signup ? "Send verification code →" : "Sign in →";
+  document.querySelector("#password").autocomplete = signup ? "new-password" : "current-password";
+  document.querySelector("#newName").required = signup;
+  document.querySelector("#newPhone").required = false;
+  document.querySelector("#newEmail").required = signup;
+  document.querySelector("#submitAuth").textContent = signup ? "Create account →" : "Sign in →";
   document.querySelector("#authToggle").textContent = signup
     ? "Already have an account? Sign in"
     : "New here? Create an account";
   document.querySelector("#error").textContent = "";
 };
+
+document.querySelector("#authToggle").addEventListener("click", () => {
+  setAuthMode(authMode === "signup" ? "signin" : "signup");
+});
 
 const showLoginButton = document.querySelector("#showLogin");
 if (showLoginButton) showLoginButton.addEventListener("click", event => {
@@ -376,17 +321,6 @@ if (showLoginButton) showLoginButton.addEventListener("click", event => {
     button.focus();
   }
 });
-
-function showOtpEntry(phone) {
-  signupStage = "otp";
-  document.querySelector("#signupFields").classList.add("hidden");
-  document.querySelector("#passwordField").classList.add("hidden");
-  document.querySelector("#otpFields").classList.remove("hidden");
-  document.querySelector("#otpCode").required = true;
-  document.querySelector("#otpMessage").textContent = `Enter the verification code sent to ${phone}.`;
-  document.querySelector("#submitAuth").textContent = "Verify code and create account →";
-  document.querySelector("#otpCode").focus();
-}
 
 async function enterWithSession(result) {
   sessionStorage.setItem("classroomToken", result.token);
@@ -411,23 +345,21 @@ document.querySelector("#loginForm").onsubmit = async event => {
   const button = document.querySelector("#submitAuth");
   button.disabled = true;
   try {
-    if (authMode === "signup" && signupStage === "details") {
-      const result = await classroomApi("/signup/start", {
+    if (authMode === "signup") {
+      const email = document.querySelector("#newEmail").value.trim().toLowerCase();
+      await classroomApi("/signup/start", {
         name: document.querySelector("#newName").value.trim(),
         phone: document.querySelector("#newPhone").value.trim(),
-        email: document.querySelector("#newEmail").value.trim().toLowerCase(),
+        email,
         password: document.querySelector("#password").value,
       });
-      showOtpEntry(result.phone);
-    } else if (authMode === "signup") {
-      const result = await classroomApi("/signup/verify", {
-        phone: document.querySelector("#newPhone").value.trim(),
-        code: document.querySelector("#otpCode").value.trim(),
-      });
-      await enterWithSession(result);
+      setAuthMode("signin");
+      document.querySelector("#username").value = email;
+      document.querySelector("#password").value = "";
+      errorBox.textContent = "If the address can be registered, a verification email is on its way. Open its link, then sign in here.";
     } else {
       const result = await classroomApi("/login", {
-        identity: document.querySelector("#username").value.trim(),
+        email: document.querySelector("#username").value.trim().toLowerCase(),
         password: document.querySelector("#password").value,
       });
       await enterWithSession(result);
@@ -438,16 +370,6 @@ document.querySelector("#loginForm").onsubmit = async event => {
     button.disabled = false;
   }
 };
-
-document.querySelector("#changePhone").addEventListener("click", () => {
-  signupStage = "details";
-  document.querySelector("#otpFields").classList.add("hidden");
-  document.querySelector("#signupFields").classList.remove("hidden");
-  document.querySelector("#passwordField").classList.remove("hidden");
-  document.querySelector("#otpCode").required = false;
-  document.querySelector("#submitAuth").textContent = "Send verification code →";
-  document.querySelector("#error").textContent = "";
-});
 
 document.querySelector("#logout").onclick = () => {
   sessionStorage.removeItem("classUser");
